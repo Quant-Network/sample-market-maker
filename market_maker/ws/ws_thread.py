@@ -1,8 +1,8 @@
-import sys
 import websocket
 import threading
 import traceback
 import ssl
+import datetime as dt
 from time import sleep
 import json
 import decimal
@@ -33,6 +33,8 @@ class BitMEXWebsocket():
     def __init__(self):
         self.logger = logging.getLogger('root')
         self.__reset()
+        # key = orderID, value = datetime of last update
+        self.unprocessed_orders = {} # This dict will be used to track any unprocessed orders (open or not yet processed by the Quant-trading.Netowork bot)
 
     def __del__(self):
         self.exit()
@@ -59,17 +61,45 @@ class BitMEXWebsocket():
         wsURL = urlunparse(urlParts)
         self.logger.info("Connecting to %s" % wsURL)
         self.__connect(wsURL)
-        self.logger.info('Connected to WS. Waiting for data images, this may take a moment...')
+        if not self.exited:
+            self.logger.info('Connected to WS. Waiting for data images, this may take a moment...')            
 
         # Connected. Wait for partials
         self.__wait_for_symbol(symbol)
         if self.shouldAuth:
             self.__wait_for_account()
-        self.logger.info('Got all market data. Starting.')
+        
+        if not self.exited:
+            self.logger.info('Got all market data. Starting.')
+        else:
+            raise Exception("Unable to connect/initialize the websocket client.") # This will interrupt the initialization process
 
     #
     # Data methods
     #
+    def add_new_unprocessed_order(self, order_data):
+        """This method adds a new order id to the data struct to be watched for updates."""
+        self.unprocessed_orders[order_data["orderID"]] = {
+            "last_refresh_ts": dt.datetime.now(),
+            "latest_order_data": order_data            
+        }
+
+    def delete_unprocessed_order(self, orderID):
+        """This method deletes an order from the data struct."""
+        if orderID in self.unprocessed_orders:
+            del self.unprocessed_orders[orderID]
+    
+    def get_unprocessed_orders(self):
+        """This method returns the unprocessed orders data struct."""
+        return self.unprocessed_orders
+
+    def update_unprocessed_order(self, order_data):
+        """This method updates an order from the data struct."""
+        if "orderID" in order_data and order_data["orderID"] in self.unprocessed_orders:
+            unprocessed_order = self.unprocessed_orders[order_data["orderID"]]
+            unprocessed_order["last_refresh_ts"] = dt.datetime.now()
+            unprocessed_order["latest_order_data"].update(order_data)
+
     def get_instrument(self, symbol):
         instruments = self.data['instrument']
         matchingInstruments = [i for i in instruments if i['symbol'] == symbol]
@@ -111,10 +141,15 @@ class BitMEXWebsocket():
         raise NotImplementedError('orderBook is not subscribed; use askPrice and bidPrice on instrument')
         # return self.data['orderBook25'][0]
 
-    def open_orders(self, clOrdIDPrefix):
+    def open_orders(self):
         orders = self.data['order']
-        # Filter to only open orders (leavesQty > 0) and those that we actually placed
-        return [o for o in orders if str(o['clOrdID']).startswith(clOrdIDPrefix) and o['leavesQty'] > 0]
+        # Filter to only open orders (leavesQty > 0)
+        return [o for o in orders if order_leaves_quantity(o)]
+
+    def our_open_orders(self):
+        """Filter to only open orders (leavesQty > 0) and those that we actually placed"""
+        orders = [o["latest_order_data"] for o in self.unprocessed_orders.values() if order_leaves_quantity(o["latest_order_data"])]        
+        return orders
 
     def position(self, symbol):
         positions = self.data['position']
@@ -137,11 +172,44 @@ class BitMEXWebsocket():
 
     def exit(self):
         self.exited = True
-        self.ws.close()
+        try:
+            self.ws.close()
+        except:
+            pass
+        self.logger.info('Exiting ws client.')
+
+    def is_client_stable(self):
+        '''Checks if the ws client is up and running as expected.'''
+        is_stable = True
+        
+        if self.__are_best_quotes_synced():
+            self.last_sync_ts = dt.datetime.now()
+    
+        if (self.last_message_received_ts + dt.timedelta(seconds=settings.WS_SEND_PING_TIMEOUT)) < dt.datetime.now() and not self.is_ping_sent:
+            self.logger.debug("Sending a ws ping after %d secs of inactivity.", settings.WS_SEND_PING_TIMEOUT)
+            self.__send_raw_command('ping')
+            self.is_ping_sent = True
+            self.last_ping_ts = dt.datetime.now()
+    
+        if (self.last_sync_ts + dt.timedelta(seconds=settings.WS_NOT_SYNCED_TIMEOUT)) < dt.datetime.now():
+            self.logger.error("The ws client does not have the best quotes in sync for more than %d seconds.", settings.WS_NOT_SYNCED_TIMEOUT)
+            is_stable = False
+    
+        if (self.is_ping_sent and (self.last_ping_ts + dt.timedelta(seconds=5)) < dt.datetime.now()):
+            self.logger.error("The ws client did not received the expected ping reply after 5 seconds.")
+            is_stable = False
+        
+        return is_stable
 
     #
     # Private methods
     #
+
+    def __are_best_quotes_synced(self):
+        '''Checks if the best quotes are in sync between the quotes and the instrument ticker.'''
+        ticker = self.get_ticker(self.symbol)
+        lastQuotes = self.data['quote'][-1]
+        return lastQuotes['bidPrice'] == ticker['buy'] and lastQuotes['askPrice'] == ticker['sell']
 
     def __connect(self, wsURL):
         '''Connect to the websocket in a thread.'''
@@ -172,7 +240,6 @@ class BitMEXWebsocket():
         if not conn_timeout or self._error:
             self.logger.error("Couldn't connect to WS! Exiting.")
             self.exit()
-            sys.exit(1)
 
     def __get_auth(self):
         '''Return auth headers. Will use API Keys if present in settings.'''
@@ -186,27 +253,39 @@ class BitMEXWebsocket():
         nonce = generate_expires()
         return [
             "api-expires: " + str(nonce),
-            "api-signature: " + generate_signature(settings.API_SECRET, 'GET', '/realtime', nonce, ''),
-            "api-key:" + settings.API_KEY
+            "api-signature: " + generate_signature(settings.BITMEX_API_SECRET, 'GET', '/realtime', nonce, ''),
+            "api-key:" + settings.BITMEX_API_KEY
         ]
 
     def __wait_for_account(self):
         '''On subscribe, this data will come down. Wait for it.'''
         # Wait for the keys to show up from the ws
-        while not {'margin', 'position', 'order'} <= set(self.data):
+        while (not {'margin', 'position', 'order'} <= set(self.data)
+                and not self.exited):
             sleep(0.1)
 
     def __wait_for_symbol(self, symbol):
         '''On subscribe, this data will come down. Wait for it.'''
-        while not {'instrument', 'trade', 'quote'} <= set(self.data):
+        while (not {'instrument', 'trade', 'quote'} <= set(self.data)
+                and not self.exited):
             sleep(0.1)
 
     def __send_command(self, command, args):
+        '''Send a command.'''
+        self.__send_raw_command({"op": command, "args": args or []})
+
+    def __send_raw_command(self, command):
         '''Send a raw command.'''
-        self.ws.send(json.dumps({"op": command, "args": args or []}))
+        self.ws.send(json.dumps(command))	
 
     def __on_message(self, message):
         '''Handler for parsing WS messages.'''
+        if message == 'pong':
+            #We just received a pong caused by a ping we are recording this and returning
+            self.last_message_received_ts = dt.datetime.now()
+            self.is_ping_sent = False
+            return	
+
         message = json.loads(message)
         self.logger.debug(json.dumps(message))
 
@@ -225,6 +304,7 @@ class BitMEXWebsocket():
                 if message['status'] == 401:
                     self.error("API Key incorrect, please check and restart.")
             elif action:
+                self.last_message_received_ts = dt.datetime.now()
 
                 if table not in self.data:
                     self.data[table] = []
@@ -239,7 +319,7 @@ class BitMEXWebsocket():
                 # 'delete'  - delete row
                 if action == 'partial':
                     self.logger.debug("%s: partial" % table)
-                    self.data[table] += message['data']
+                    self.data[table] = message['data']
                     # Keys are communicated on partials to let you know how to uniquely identify
                     # an item. We use it for updates.
                     self.keys[table] = message['keys']
@@ -252,11 +332,16 @@ class BitMEXWebsocket():
                     if table not in ['order', 'orderBookL2'] and len(self.data[table]) > BitMEXWebsocket.MAX_TABLE_LEN:
                         self.data[table] = self.data[table][(BitMEXWebsocket.MAX_TABLE_LEN // 2):]
 
+                    for insertData in message['data']:
+                        if table == 'order':
+                            # update the latest unprocessed orders data
+                            self.update_unprocessed_order(insertData)
+
                 elif action == 'update':
                     self.logger.debug('%s: updating %s' % (table, message['data']))
                     # Locate the item in the collection and update it.
                     for updateData in message['data']:
-                        item = findItemByKeys(self.keys[table], self.data[table], updateData)
+                        item = find_by_keys(self.keys[table], self.data[table], updateData)
                         if not item:
                             continue  # No item found to update. Could happen before push
 
@@ -270,19 +355,22 @@ class BitMEXWebsocket():
                                     self.logger.info("Execution: %s %d Contracts of %s at %.*f" %
                                              (item['side'], contExecuted, item['symbol'],
                                               instrument['tickLog'], item['price']))
+                        
+                            # update the latest unprocessed orders data
+                            self.update_unprocessed_order(updateData)
 
                         # Update this item.
                         item.update(updateData)
 
                         # Remove canceled / filled orders
-                        if table == 'order' and item['leavesQty'] <= 0:
+                        if table == 'order' and not order_leaves_quantity(item):
                             self.data[table].remove(item)
 
                 elif action == 'delete':
                     self.logger.debug('%s: deleting %s' % (table, message['data']))
                     # Locate the item in the collection and remove it.
                     for deleteData in message['data']:
-                        item = findItemByKeys(self.keys[table], self.data[table], deleteData)
+                        item = find_by_keys(self.keys[table], self.data[table], deleteData)
                         self.data[table].remove(item)
                 else:
                     raise Exception("Unknown action: %s" % action)
@@ -301,20 +389,29 @@ class BitMEXWebsocket():
             self.error(error)
 
     def __reset(self):
+        # check if a ping was sent out and we are still wating for a pong
+        self.is_ping_sent = False
+        # the TS of the last message received
+        self.last_message_received_ts = dt.datetime.now()
+        # the TS of the last time we have sent a ping
+        self.last_ping_ts = dt.datetime.now()
+        # the TS of the last time we had the ticket and the orderbook synced
+        self.last_sync_tS = dt.datetime.now()
         self.data = {}
         self.keys = {}
         self.exited = False
         self._error = None
 
 
-def findItemByKeys(keys, table, matchData):
+def find_by_keys(keys, table, matchData):
     for item in table:
-        matched = True
-        for key in keys:
-            if item[key] != matchData[key]:
-                matched = False
-        if matched:
+        if all(item[k] == matchData[k] for k in keys):
             return item
+
+def order_leaves_quantity(o):
+    if o['leavesQty'] is None:
+        return True
+    return o['leavesQty'] > 0
 
 if __name__ == "__main__":
     # create console handler and set level to debug

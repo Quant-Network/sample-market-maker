@@ -48,6 +48,9 @@ class BitMEX(object):
 
         self.timeout = timeout
 
+        # This set will cointain the clOrdIDs of open orders which were not acknowledged yet
+        self.pending_open_orders = set()
+
     def __del__(self):
         self.exit()
 
@@ -171,7 +174,9 @@ class BitMEX(object):
     def create_bulk_orders(self, orders):
         """Create multiple orders."""
         for order in orders:
-            order['clOrdID'] = self.orderIDPrefix + base64.b64encode(uuid.uuid4().bytes).decode('utf8').rstrip('=\n')
+            clOrdID = self.orderIDPrefix + base64.b64encode(uuid.uuid4().bytes).decode('utf8').rstrip('=\n')
+            self.pending_open_orders.add(clOrdID)
+            order['clOrdID'] = clOrdID
             order['symbol'] = self.symbol
             if self.postOnly:
                 order['execInst'] = 'ParticipateDoNotInitiate'
@@ -180,7 +185,39 @@ class BitMEX(object):
     @authentication_required
     def open_orders(self):
         """Get open orders."""
-        return self.ws.open_orders(self.orderIDPrefix)
+        if self.pending_open_orders:
+            # We have pending orders from the last iteration, need to check their status
+            latest_orders = self.http_latest_orders()
+
+            for order in latest_orders:
+                if order["clOrdID"] in self.pending_open_orders:
+                    # our pending order has hit the exchange and thus we need to keep track of its execution
+                    self.ws.add_new_unprocessed_order(order) # adding this order id to keep track of it
+                    self.pending_open_orders.discard(order["clOrdID"])
+                    self.logger.info("open_orders - Found a pending order with clOrdID(%s). Details: %s", order["clOrdID"], order)
+            
+            for missing_clOrdId in self.pending_open_orders:
+                self.logger.info("open_orders - It seems that a previous order with clOrdID(%s) did not hit the exchange.", missing_clOrdId)
+            
+            self.pending_open_orders = set() # clearing the pending orders
+
+        return self.ws.our_open_orders()
+
+    @authentication_required
+    def http_latest_orders(self):
+        """Get latest orders via HTTP. Used on situations where pending orders exist to ensure we catch them all."""
+        path = "order"
+        orders = self._curl_bitmex(
+            path=path,
+            query={
+                'filter': json.dumps({'symbol': self.symbol}),
+                'count': 100,
+                'reverse': True # ensure we get the newest orders first
+            },
+            verb="GET"
+        )
+        # Only return orders that start with our clOrdID prefix.
+        return [o for o in orders if str(o['clOrdID']).startswith(self.orderIDPrefix)]
 
     @authentication_required
     def http_open_orders(self):
@@ -196,6 +233,20 @@ class BitMEX(object):
         )
         # Only return orders that start with our clOrdID prefix.
         return [o for o in orders if str(o['clOrdID']).startswith(self.orderIDPrefix)]
+
+    @authentication_required
+    def http_get_order(self, orderID):
+        """Get the order via HTTP to get the latest state of the it."""
+        path = "order"
+        orders = self._curl_bitmex(
+            path=path,
+            query={
+                'filter': json.dumps({'orderID': orderID}),
+                'count': 1
+            },
+            verb="GET"
+        )
+        return orders
 
     @authentication_required
     def cancel(self, orderID):
@@ -217,7 +268,7 @@ class BitMEX(object):
         }
         return self._curl_bitmex(path=path, postdict=postdict, verb="POST", max_retries=0)
 
-    def _curl_bitmex(self, path, query=None, postdict=None, timeout=None, verb=None, rethrow_errors=False,
+    def _curl_bitmex(self, path, query=None, postdict=None, timeout=None, verb=None, rethrow_errors=True,
                      max_retries=None):
         """Send a request to BitMEX Servers."""
         # Handle URL
@@ -261,6 +312,13 @@ class BitMEX(object):
             response = self.session.send(prepped, timeout=timeout)
             # Make non-200s throw
             response.raise_for_status()
+
+            # our new orders were successful therefore we need to watch them
+            if path =="order/bulk" and verb == "POST":
+                orders = response.json()
+                for order in orders:
+                    self.pending_open_orders.discard(order["clOrdID"])
+                    self.ws.add_new_unprocessed_order(order) # adding this order id to keep track of it
 
         except requests.exceptions.HTTPError as e:
             if response is None:

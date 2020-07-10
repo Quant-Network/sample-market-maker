@@ -1,180 +1,126 @@
-# BitMEX Market Maker
+# Quant-trading.network BitMEX Market Maker
 
-This is a sample market making bot for use with [BitMEX](https://www.bitmex.com).
+This is a fully working sample market making bot for use with [BitMEX](https://www.bitmex.com).
 
-It is free to use and modify for your own strategies. It provides the following:
+It is free to use and modify for your own development.
 
-* A `BitMEX` object wrapping the REST and WebSocket APIs.
-  * All data is realtime and efficiently [fetched via the WebSocket](market_maker/ws/ws_thread.py). This is the fastest way to get market data.
-  * Orders may be created, queried, and cancelled via `BitMEX.buy()`, `BitMEX.sell()`, `BitMEX.open_orders()` and the like.
-  * Withdrawals may be requested (but they still must be confirmed via email and 2FA).
-  * Connection errors and WebSocket reconnection is handled for you.
-  * [Permanent API Key](https://testnet.bitmex.com/app/apiKeys) support is included.
-* [A scaffolding for building your own trading strategies.](#advanced-usage)
-  * Out of the box, a simple market making strategy is implemented that blankets the bid and ask.
-  * More complicated strategies are up to the user. Try incorporating [index data](https://testnet.bitmex.com/app/index/.XBT),
-    query other markets to catch moves early, or develop your own completely custom strategy.
-
-**Develop on [Testnet](https://testnet.bitmex.com) first!** Testnet trading is completely free and is identical to the live market.
-
-> BitMEX is not responsible for any losses incurred when using this code. This code is intended for sample purposes ONLY - do not
-  use this code for real trades unless you fully understand what it does and what its caveats are.
-
-> This is not a sophisticated market making program. It is intended to show the basics of market making while abstracting some
-  of the rote work of interacting with the BitMEX API. It does not make smart decisions and will likely lose money.
+**Test on [Testnet](https://testnet.bitmex.com) first!** Testnet trading is completely free and is identical to the live market.
 
 ## Getting Started
 
-1. Create a [Testnet BitMEX Account](https://testnet.bitmex.com) and [deposit some TBTC](https://testnet.bitmex.com/app/deposit).
-2. Install: `pip install bitmex-market-maker`. It is strongly recommeded to use a virtualenv.
-3. Create a marketmaker project: run `marketmaker setup`
+1. Create a [Quant-trading.network Account](https://www.quant-trading.network/) and checkout an algorihtm subscription.
+2. Create a [Testnet BitMEX Account](https://testnet.bitmex.com) and [deposit some TBTC](https://testnet.bitmex.com/app/deposit).
+3. Install: `pip install quant-trading-bitmex-market-maker`. It is strongly recommeded to use a virtualenv.
+4. Create a marketmaker project: run `marketmaker setup`
     * This will create `settings.py` and `market_maker/` in the working directory.
-    * Modify `settings.py` to tune parameters.
-4. Edit settings.py to add your [BitMEX API Key and Secret](https://testnet.bitmex.com/app/apiKeys) and change bot parameters.
+    * Modify `settings.py` to configure the parameters.
+5. Edit settings.py to add your [BitMEX API Key and Secret](https://testnet.bitmex.com/app/apiKeys) and your [Quant-trading.network API Key](https://www.quant-trading.network/app/account#api-key), chose the quant-trading algorigthm to use and change bot parameters to fit your risk profile.
     * Note that user/password authentication is not supported.
-    * Run with `DRY_RUN=True` to test cost and spread.
-5. Run it: `marketmaker [symbol]`
-6. Satisfied with your bot's performance? Create a [live API Key](https://www.bitmex.com/app/apiKeys) for your
-   BitMEX account, set the `BASE_URL` and start trading!
+6. Run it: `marketmaker`
+7. Satisfied with your bot's performance? Create a [live API Key](https://www.bitmex.com/app/apiKeys) for your BitMEX account, [`clear the bot internal state`](#clearing-the-bot-internal-state) and then set the `BASE_URL` and start trading!
+
+## Configure your bot (`settings.py`)
+
+A brief explanation of parameters that you will have to configure before using this bot. You can find these parameters in the settings file `settings.py`.
+
+* `BASE_URL` - The URL of the BitMEX exchange api (either the testnet one or the live market).
+* `BITMEX_API_KEY` - The BitMEX API key associated with your account (make sure that this key will have the right permissions to place trading orders).
+* `BITMEX_API_SECRET` - The BitMEX API key secret associated with your account.
+* `QUANT_API_KEY` - The quant-trading.network API key associated with your account.
+* `QUANT_ALGO` - The quant-trading.network algorithm you want to use (make sure that you have an active subscription for the chosen algorithm).
+* `TRADING_BALANCE_SIZE` - The maximum trading position size in terms of percentage of your BitMEX account margin balance. The bigger the trading position the bigger will the rewards be, but also the risk of getting your BitMEX account liquidated. Therefore we have capped this parameter with reasonable limits for safety. This setting has the following limits `Min=10% & Max=100%`.
+
+## Warning
+
+Please make sure to not use the associated BitMEX account other than by this bot. When you start trading with this bot make sure that you do not have any open position on BitMEX, otherwise, this may lead to unpredictable consequences including your BitMEX account liquidation!!!
+
+## Clearing the bot internal state
+
+This is an action that you will have to take every time when you need to change some of the bot parameters as well as one of the [`troubleshooting measure`](#troubleshooting). When you execute this bot it will create two important files `open_longs.py` & `open_shorts.py` where it will save its internal state periodically so that it can recover its state after a restart. Therefore if you have to change certain bot parameters such as `BASE_URL`, `QUANT_ALGO` and `TRADING_BALANCE_SIZE`, this change will invalidate the current state saved in these files and hence you will have to execute the actions below:
+
+* Close the market maker bot.
+* Make sure that you close any open position that may have in your BitMEX account before starting the market maker bot.
+* If the files `open_longs.py` & `open_shorts.py` exist in the bot working directory delete them.
+* If you need to change your bot configuration go over the file `settings.py` and make the necessary changes.
+* Now you can start up the bot and make sure that it starts [`correctly`](#simplified-output).
 
 ## Operation Overview
 
 This market maker works on the following principles:
 
+* The market maker bot during its execution will create two important files `open_longs.py` & `open_shorts.py` where it will save its internal state periodically so that it can recover its state after a restart.
 * The market maker tracks the last `bidPrice` and `askPrice` of the quoted instrument to determine where to start quoting.
-* Based on parameters set by the user, the bot creates a descriptions of orders it would like to place.
-  - If `settings.MAINTAIN_SPREADS` is set, the bot will start inside the current spread and work outwards.
-  - Otherwise, spread is determined by interval calculations.
-* If the user specifies position limits, these are checked. If the current position is beyond a limit,
-  the bot stops quoting that side of the market.
+* Based on quant-trading algorithm parameters, the bot creates a descriptions of orders it would like to place.
+  - This will be done when the bot gets the quant-trading algorithm real-time decision for the given current position in BitMEX.
+  - That personalized decision will either wait or it will increase\decrease the current long or short position. 
+	By repeating this process the quant-trading algorithm will totally manage your current position in BitMEX over time without any human intervention.
 * These order descriptors are compared with what the bot has currently placed in the market.
   - If an existing order can be amended to the desired value, it is amended.
   - Otherwise, a new order is created.
   - Extra orders are canceled.
-* The bot then prints details of contracts traded, tickers, and total delta.
+* The bot then prints details of contracts traded, current balance, and current position size in percentage of the balance and in contracts amount.
 
 ## Simplified Output
 
 The following is some of what you can expect when running this bot:
 
 ```
-2016-01-28 17:29:31,054 - INFO - market_maker - BitMEX Market Maker Version: 1.0
-2016-01-28 17:29:31,074 - INFO - ws_thread - Connecting to wss://testnet.bitmex.com/realtime?subscribe=quote:XBT7D,trade:XBT7D,instrument,order:XBT7D,execution:XBT7D,margin,position
-2016-01-28 17:29:31,074 - INFO - ws_thread - Authenticating with API Key.
-2016-01-28 17:29:31,075 - INFO - ws_thread - Started thread
-2016-01-28 17:29:32,079 - INFO - ws_thread - Connected to WS. Waiting for data images, this may take a moment...
-2016-01-28 17:29:32,079 - INFO - ws_thread - Got all market data. Starting.
-2016-01-28 17:29:32,079 - INFO - market_maker - Using symbol XBT7D.
-2016-01-28 17:29:32,079 - INFO - market_maker - Order Manager initializing, connecting to BitMEX. Live run: executing real trades.
-2016-01-28 17:29:32,079 - INFO - market_maker - Resetting current position. Cancelling all existing orders.
-2016-01-28 17:29:33,460 - INFO - market_maker - XBT7D Ticker: Buy: 388.61, Sell: 389.89
-2016-01-28 17:29:33,461 - INFO - market_maker - Start Positions: Buy: 388.62, Sell: 389.88, Mid: 389.25
-2016-01-28 17:29:33,461 - INFO - market_maker - Current XBT Balance: 3.443498
-2016-01-28 17:29:33,461 - INFO - market_maker - Current Contract Position: -1
-2016-01-28 17:29:33,461 - INFO - market_maker - Avg Cost Price: 389.75
-2016-01-28 17:29:33,461 - INFO - market_maker - Avg Entry Price: 389.75
-2016-01-28 17:29:33,462 - INFO - market_maker - Contracts Traded This Run: 0
-2016-01-28 17:29:33,462 - INFO - market_maker - Total Contract Delta: -17.7510 XBT
-2016-01-28 17:29:33,462 - INFO - market_maker - Creating 4 orders:
-2016-01-28 17:29:33,462 - INFO - market_maker - Sell 100 @ 389.88
-2016-01-28 17:29:33,462 - INFO - market_maker - Sell 200 @ 390.27
-2016-01-28 17:29:33,463 - INFO - market_maker -  Buy 100 @ 388.62
-2016-01-28 17:29:33,463 - INFO - market_maker -  Buy 200 @ 388.23
------
-2016-01-28 17:29:37,366 - INFO - ws_thread - Execution: Sell 1 Contracts of XBT7D at 389.88
-2016-01-28 17:29:38,943 - INFO - market_maker - XBT7D Ticker: Buy: 388.62, Sell: 389.88
-2016-01-28 17:29:38,943 - INFO - market_maker - Start Positions: Buy: 388.62, Sell: 389.88, Mid: 389.25
-2016-01-28 17:29:38,944 - INFO - market_maker - Current XBT Balance: 3.443496
-2016-01-28 17:29:38,944 - INFO - market_maker - Current Contract Position: -2
-2016-01-28 17:29:38,944 - INFO - market_maker - Avg Cost Price: 389.75
-2016-01-28 17:29:38,944 - INFO - market_maker - Avg Entry Price: 389.75
-2016-01-28 17:29:38,944 - INFO - market_maker - Contracts Traded This Run: -1
-2016-01-28 17:29:38,944 - INFO - market_maker - Total Contract Delta: -17.7510 XBT
-2016-01-28 17:29:38,945 - INFO - market_maker - Amending Sell: 99 @ 389.88 to 100 @ 389.88 (+0.00)
+2020-07-10 08:41:49,680 - INFO - market_maker_runner - BitMEX Quant-trading.Network Market Maker Version: v1.0
+
+2020-07-10 08:41:51,253 - INFO - ws_thread - Connecting to wss://testnet.bitmex.com/realtime?subscribe=quote:XBTUSD,trade:XBTUSD,instrument,order:XBTUSD,execution:XBTUSD,margin,position
+2020-07-10 08:41:51,254 - INFO - ws_thread - Authenticating with API Key.
+2020-07-10 08:41:51,255 - INFO - ws_thread - Started thread
+2020-07-10 08:41:52,255 - INFO - ws_thread - Connected to WS. Waiting for data images, this may take a moment...
+2020-07-10 08:41:53,066 - INFO - ws_thread - Got all market data. Starting.
+2020-07-10 08:41:53,066 - INFO - market_maker - Using symbol XBTUSD.
+2020-07-10 08:41:53,066 - INFO - market_maker - Order Manager initializing, connecting to BitMEX. Live run: executing real trades.
+2020-07-10 08:41:53,067 - INFO - market_maker - Resetting current position. Canceling all existing orders.
+2020-07-10 08:41:53,067 - INFO - bitmex - sending req to https://testnet.bitmex.com/api/v1/order: {"filter": "{\"ordStatus.isTerminated\": false, \"symbol\": \"XBTUSD\"}", "count": 500}
+2020-07-10 08:41:54,323 - INFO - quant_base_strategy - print_status - Current XBT Balance: 0.962841
+2020-07-10 08:41:54,323 - INFO - quant_base_strategy - print_status - Current Contract Position: 0
+2020-07-10 08:41:54,323 - INFO - quant_base_strategy - print_status - Current Internal Position Percentage Size: 0.00
+2020-07-10 08:41:54,324 - INFO - quant_base_strategy - print_status - Current Internal Contract Position: 0
+2020-07-10 08:42:02,592 - INFO - quant_base_strategy - print_status - Current XBT Balance: 0.962841
+2020-07-10 08:42:02,593 - INFO - quant_base_strategy - print_status - Current Contract Position: 0
+2020-07-10 08:42:02,593 - INFO - quant_base_strategy - print_status - Current Internal Position Percentage Size: 0.00
+2020-07-10 08:42:02,593 - INFO - quant_base_strategy - print_status - Current Internal Contract Position: 0
+2020-07-10 08:42:02,593 - INFO - quant_base_strategy - handle_new_decision - new decision OPEN_LONG.
+2020-07-10 08:42:02,594 - INFO - market_maker - Creating 1 orders:
+2020-07-10 08:42:02,594 - INFO - market_maker -  Buy 882 @ 9163.0
+2020-07-10 08:42:02,594 - INFO - bitmex - sending req to https://testnet.bitmex.com/api/v1/order/bulk: {"orders": [{"price": 9163.0, "orderQty": 882, "side": "Buy", "clOrdID": "mm_bitmex_*REDACTED*", "symbol": "XBTUSD", "execInst": "ParticipateDoNotInitiate"}]}
+2020-07-10 08:43:52,048 - INFO - ws_thread - Execution: Buy 725 Contracts of XBTUSD at 9163.0
+2020-07-10 08:44:02,583 - INFO - ws_thread - Execution: Buy 157 Contracts of XBTUSD at 9163.0
+2020-07-10 08:44:02,713 - INFO - quant_base_strategy - check_new_trade - We have a completed trade. Order details: {'orderID': '*REDACTED*', 'clOrdID': 'mm_bitmex_*REDACTED*', 'clOrdLinkID': '', 'account': 119731, 'symbol': 'XBTUSD', 'side': 'Buy', 'simpleOrderQty': None, 'orderQty': 882, 'price': 9163, 'displayQty': None, 'stopPx': None, 'pegOffsetValue': None, 'pegPriceType': '', 'currency': 'USD', 'settlCurrency': 'XBt', 'ordType': 'Limit', 'timeInForce': 'GoodTillCancel', 'execInst': 'ParticipateDoNotInitiate', 'contingencyType': '', 'exDestination': 'XBME', 'ordStatus': 'Filled', 'triggered': '', 'workingIndicator': False, 'ordRejReason': '', 'simpleLeavesQty': None, 'leavesQty': 0, 'simpleCumQty': None, 'cumQty': 882, 'avgPx': 9163.5, 'multiLegReportingType': 'SingleSecurity', 'text': 'Submitted via API.', 'transactTime': '2020-07-10T07:42:02.660Z', 'timestamp': '2020-07-10T07:44:02.524Z'}
+2020-07-10 08:58:46,989 - INFO - quant_base_strategy - print_status - Current XBT Balance: 0.962433
+2020-07-10 08:58:46,990 - INFO - quant_base_strategy - print_status - Current Contract Position: 882
+2020-07-10 08:58:46,990 - INFO - quant_base_strategy - print_status - Avg Cost Price: 9163.5
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Avg Entry Price: 9163.5
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Current Internal Position Percentage Size: 10.00
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Current Internal Contract Position: 882
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - handle_new_decision - new decision NONE.
+
 
 ```
-
-## Advanced usage
-
-You can implement custom trading strategies using the market maker. `market_maker.OrderManager`
-controls placing, updating, and monitoring orders on BitMEX. To implement your own custom
-strategy, subclass `market_maker.OrderManager` and override `OrderManager.place_orders()`:
-
-```
-from market_maker.market_maker import OrderManager
-
-class CustomOrderManager(OrderManager):
-    def place_orders(self) -> None:
-        # implement your custom strategy here
-```
-
-Your strategy should provide a set of orders. An order is a dict containing price, quantity, and
-whether the order is buy or sell. For example:
-
-```
-buy_order = {
-    'price': 1234.5, # float
-    'orderQty': 100, # int
-    'side': 'Buy'
-}
-
-sell_order = {
-    'price': 9876.5, # float
-    'orderQty': 100, # int
-    'side': 'Sell'
-}
-```
-
-Call `self.converge_orders()` to submit your orders. `converge_orders()` will create, amend,
-and delete orders on BitMEX as necessary to match what you pass in:
-
-```
-def place_orders(self) -> None:
-    buy_orders = []
-    sell_orders = []
-
-    # populate buy and sell orders, e.g.
-    buy_orders.append({'price': 998.0, 'orderQty': 100, 'side': "Buy"})
-    buy_orders.append({'price': 999.0, 'orderQty': 100, 'side': "Buy"})
-    sell_orders.append({'price': 1000.0, 'orderQty': 100, 'side': "Sell"})
-    sell_orders.append({'price': 1001.0, 'orderQty': 100, 'side': "Sell"})
-
-    self.converge_orders(buy_orders, sell_orders)
-```
-
-To run your strategy, call `run_loop()`:
-```
-order_manager = CustomOrderManager()
-order_manager.run_loop()
-```
-
-Your custom strategy will run until you terminate the program with CTRL-C. There is an example
-in `custom_strategy.py`.
-
-## Notes on Rate Limiting
-
-By default, the BitMEX API rate limit is 300 requests per 5 minute interval (avg 1/second).
-
-This bot uses the WebSocket and bulk order placement/amend to greatly reduce the number of calls sent to the BitMEX API.
-
-Most calls to the API consume one request, except:
-
-* Bulk order placement/amend: Consumes 0.1 requests, rounded up, per order. For example, placing 16 orders consumes
-  2 requests.
-* Bulk order cancel: Consumes 1 request no matter the size. Is not blocked by an exceeded ratelimit; cancels will
-  always succeed. This bot will always cancel all orders on an error or interrupt.
-
-If you are quoting multiple contracts and your ratelimit is becoming an obstacle, please
-[email support](mailto:support@bitmex.com) with details of your quoting. In the vast majority of cases,
-we are able to raise a user's ratelimit without issue.
 
 ## Troubleshooting
+
+This bot during its execution life cycle it will try to keep its internal representation of the current position and the real current position in sync. This is really important so keep an eye on this. Because the algorithms' decisions are based on this internal representation. So during the bot execution, it will periodically print its status just like below:
+
+```
+2020-07-10 08:58:46,989 - INFO - quant_base_strategy - print_status - Current XBT Balance: 0.962433
+2020-07-10 08:58:46,990 - INFO - quant_base_strategy - print_status - Current Contract Position: 882
+2020-07-10 08:58:46,990 - INFO - quant_base_strategy - print_status - Avg Cost Price: 9163.5
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Avg Entry Price: 9163.5
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Current Internal Position Percentage Size: 10.00
+2020-07-10 08:58:46,991 - INFO - quant_base_strategy - print_status - Current Internal Contract Position: 882
+```
+
+* `Current Contract Position` should have the exact same value as `Current Internal Contract Position`. If this is not the case then you will have to close the bot, close your current position in your BitMEX account, and then [`clear the bot internal state`](#clearing-the-bot-internal-state).
 
 Common errors we've seen:
 
 * `TypeError: __init__() got an unexpected keyword argument 'json'`
   * This is caused by an outdated version of `requests`. Run `pip install -U requests` to update.
-
 
 ## Compatibility
 
@@ -182,5 +128,8 @@ This module supports Python 3.5 and later.
 
 ## See also
 
-BitMEX has a Python [REST client](https://github.com/BitMEX/api-connectors/tree/master/official-http/python-swaggerpy)
-and [websocket client.](https://github.com/BitMEX/api-connectors/tree/master/official-ws/python)
+Quant-trading.network has a Python [REST client](https://github.com/Quant-Network/python-api-client)
+
+## Author
+
+support@quant-trading.network
