@@ -396,7 +396,7 @@ class BitMEXWebsocket():
         # the TS of the last time we have sent a ping
         self.last_ping_ts = dt.datetime.now()
         # the TS of the last time we had the ticket and the orderbook synced
-        self.last_sync_tS = dt.datetime.now()
+        self.last_sync_ts = dt.datetime.now()
         self.data = {}
         self.keys = {}
         self.exited = False
