@@ -16,7 +16,7 @@ setup(name='quant-trading-bitmex-market-maker',
       long_description_content_type='text/markdown',
       author = "Quant-trading.Network",
       author_email="support@quant-trading.network",
-      download_url = "https://github.com/Quant-Network/sample-market-maker/archive/v2.1.tar.gz",
+      download_url = "https://github.com/Quant-Network/sample-market-maker/archive/v2.4.tar.gz",
       keywords=["Market making bot", "BitMEX Market making bot", "algorithmic trading", "trading", "bitcoin"],
       install_requires=[
           'requests',
