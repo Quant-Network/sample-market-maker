@@ -93,6 +93,8 @@ class QuantBaseManager(OrderManager):
             pickle.dump(self.open_longs_list, fp)
         with open("open_shorts.py", "wb") as fp:   # Pickling
             pickle.dump(self.open_shorts_list, fp)
+        with open("last_algo_call_ts.py", "wb") as fp:
+            pickle.dump(self.last_algo_call_ts, fp) # Pickling
 
     def load_open_trades_data(self):
         """In case of restart the bot is able to restore its state"""
@@ -102,6 +104,9 @@ class QuantBaseManager(OrderManager):
         if path.isfile("open_shorts.py"):
             with open("open_shorts.py", "rb") as fp:   # Unpickling
                 self.open_shorts_list = pickle.load(fp)
+        if path.isfile("last_algo_call_ts.py"):
+            with open("last_algo_call_ts.py", "rb") as fp:   # Unpickling
+                self.last_algo_call_ts = pickle.load(fp)
         
         all_open_trades = self.open_longs_list + self.open_shorts_list
 
