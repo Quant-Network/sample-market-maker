@@ -46,7 +46,7 @@ class QuantBaseManager(OrderManager):
             self.closed_position_ts = None  # The timestamp when a position was closed
 
             # loads the internal positions from the previous execution
-            self.load_open_trades_data()
+            self.load_saved_state_data()
 
             # init base class
             super(QuantBaseManager, self).__init__()
@@ -88,15 +88,18 @@ class QuantBaseManager(OrderManager):
     ###
 
     def save_open_trades_data(self):
-        """It saves the current state to the disk"""
+        """It saves the current open trades state to the disk"""
         with open("open_longs.py", "wb") as fp:   # Pickling
             pickle.dump(self.open_longs_list, fp)
         with open("open_shorts.py", "wb") as fp:   # Pickling
             pickle.dump(self.open_shorts_list, fp)
+
+    def save_last_algo_call_data(self):
+        """It saves the last algo call ts state to the disk"""
         with open("last_algo_call_ts.py", "wb") as fp:
             pickle.dump(self.last_algo_call_ts, fp) # Pickling
 
-    def load_open_trades_data(self):
+    def load_saved_state_data(self):
         """In case of restart the bot is able to restore its state"""
         if path.isfile("open_longs.py"):
             with open("open_longs.py", "rb") as fp:   # Unpickling
@@ -293,6 +296,7 @@ class QuantBaseManager(OrderManager):
                 self.print_status()       # Print the current bot status
                 self.handle_new_decision(api_response.decision)
                 self.last_algo_call_ts = dt.datetime.now()
+                self.save_last_algo_call_data()
             except ApiException as e:
                 self.logger.error("get_quant_decision - Exception when calling Quant-trading.Network Api->post_exec_algo: %s", e)
 
