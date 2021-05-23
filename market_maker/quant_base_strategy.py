@@ -35,6 +35,9 @@ class QuantBaseManager(OrderManager):
 
             # state vars
             self.last_algo_call_ts = dt.datetime.now() - dt.timedelta(seconds=self.decision_polling_interval_in_seconds)
+            self.last_decision = "NONE"
+            self.last_decision_taken = True # Is the last decision settled in the market?
+            self.last_decision_recovered = True # In case of a bot restart
             self.open_long = False
             self.open_short = False
             self.open_qty = 0
@@ -95,9 +98,14 @@ class QuantBaseManager(OrderManager):
             pickle.dump(self.open_shorts_list, fp)
 
     def save_last_algo_call_data(self):
-        """It saves the last algo call ts state to the disk"""
-        with open("last_algo_call_ts.py", "wb") as fp:
-            pickle.dump(self.last_algo_call_ts, fp) # Pickling
+        """It saves the last algo call state to the disk"""
+        last_algo_call_state = {
+            'last_algo_call_ts': self.last_algo_call_ts,
+            'last_decision': self.last_decision,
+            'last_decision_taken': self.last_decision_taken
+        }
+        with open("last_algo_call_state.py", "wb") as fp:
+            pickle.dump(last_algo_call_state, fp) # Pickling
 
     def load_saved_state_data(self):
         """In case of restart the bot is able to restore its state"""
@@ -107,9 +115,14 @@ class QuantBaseManager(OrderManager):
         if path.isfile("open_shorts.py"):
             with open("open_shorts.py", "rb") as fp:   # Unpickling
                 self.open_shorts_list = pickle.load(fp)
-        if path.isfile("last_algo_call_ts.py"):
-            with open("last_algo_call_ts.py", "rb") as fp:   # Unpickling
-                self.last_algo_call_ts = pickle.load(fp)
+        if path.isfile("last_algo_call_state.py"):
+            with open("last_algo_call_state.py", "rb") as fp:   # Unpickling
+                last_algo_call_state = pickle.load(fp)
+                self.last_algo_call_ts = last_algo_call_state['last_algo_call_ts']
+                self.last_decision = last_algo_call_state['last_decision']
+                self.last_decision_taken = last_algo_call_state['last_decision_taken']
+                if not self.last_decision_taken:
+                    self.last_decision_recovered = False # During the bot restart we have lost our last decision
         
         all_open_trades = self.open_longs_list + self.open_shorts_list
 
@@ -146,7 +159,9 @@ class QuantBaseManager(OrderManager):
         while len(self.open_longs_list) > 0 and len(self.open_shorts_list) > 0:
             self.proccess_deleverage_trade()
         
+        self.last_decision_taken = True
         self.save_open_trades_data()
+        self.save_last_algo_call_data()
 
     def proccess_deleverage_trade(self):
         """In case of a deleverage trade we calculate the trade pnl and adjust the open trades accordingly"""
@@ -271,11 +286,13 @@ class QuantBaseManager(OrderManager):
         if new_decision == "OPEN_LONG" and not self.open_long and not self.open_short and current_position_size < 1.0:
             self.open_long = True
             self.open_qty = self.determine_long_qty()
+            self.last_decision_taken = False
         elif new_decision == "CANCEL_LONG" and self.open_long:
             self.open_long = False
         elif new_decision == "OPEN_SHORT" and not self.open_short and not self.open_long and current_position_size > -1.0:
             self.open_short = True
             self.open_qty = -self.determine_short_qty()
+            self.last_decision_taken = False
         elif new_decision == "CANCEL_SHORT" and self.open_short:
             self.open_short = False
 
@@ -296,9 +313,16 @@ class QuantBaseManager(OrderManager):
                 self.print_status()       # Print the current bot status
                 self.handle_new_decision(api_response.decision)
                 self.last_algo_call_ts = dt.datetime.now()
+                self.last_decision = api_response.decision
                 self.save_last_algo_call_data()
             except ApiException as e:
                 self.logger.error("get_quant_decision - Exception when calling Quant-trading.Network Api->post_exec_algo: %s", e)
+        elif not self.last_decision_taken and not self.last_decision_recovered:
+            self.logger.info("get_quant_decision - It seems the bot has restarted while the previous decision was not taken. Recovering last decision: %s", self.last_decision)
+            self.print_status()       # Print the current bot status
+            self.handle_new_decision(self.last_decision) # Please note that last_decision_taken is False which means last_decision is different from NONE
+            self.last_decision_recovered = True # Recovered the last decision
+            self.save_last_algo_call_data()
 
     ###
     # Trades
