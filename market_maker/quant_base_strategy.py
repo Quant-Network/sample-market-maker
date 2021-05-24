@@ -314,6 +314,7 @@ class QuantBaseManager(OrderManager):
                 self.handle_new_decision(api_response.decision)
                 self.last_algo_call_ts = dt.datetime.now()
                 self.last_decision = api_response.decision
+                self.last_decision_recovered = True # Recovering the last decision is not needed for we got a fresh decision
                 self.save_last_algo_call_data()
             except ApiException as e:
                 self.logger.error("get_quant_decision - Exception when calling Quant-trading.Network Api->post_exec_algo: %s", e)
