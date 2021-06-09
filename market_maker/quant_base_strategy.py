@@ -1,6 +1,7 @@
 import sys
 import os
 from os import path
+import math
 import traceback
 import datetime as dt
 from time import sleep
@@ -32,6 +33,7 @@ class QuantBaseManager(OrderManager):
             self.position_stake_size_percentage = api_response.position_stake_size_percentage
 
             self.stake_size = self.position_stake_size_percentage / 100.0
+            self.lot_size = 100
 
             # state vars
             self.last_algo_call_ts = dt.datetime.now() - dt.timedelta(seconds=self.decision_polling_interval_in_seconds)
@@ -76,6 +78,7 @@ class QuantBaseManager(OrderManager):
         position = self.exchange.get_position()
         self.running_qty = self.exchange.get_delta()
         tickLog = self.exchange.get_instrument()['tickLog']
+        self.lot_size = self.exchange.get_instrument()['lotSize']
         self.start_XBt = margin["marginBalance"]
 
         self.logger.info("print_status - Current XBT Balance: %.6f", XBt_to_XBT(self.start_XBt))
@@ -383,8 +386,9 @@ class QuantBaseManager(OrderManager):
         """Create an order object."""
 
         price = self.get_price_offset(index)
+        truncated_open_qty = math.trunc(abs(self.open_qty) / self.lot_size) * self.lot_size
 
-        return {'price': price, 'orderQty': abs(self.open_qty), 'side': "Buy" if index < 0 else "Sell"}
+        return {'price': price, 'orderQty': truncated_open_qty, 'side': "Buy" if index < 0 else "Sell"}
 
     def __cancel_orders(self):
         """Cancel all open orders and process any potential fills."""
